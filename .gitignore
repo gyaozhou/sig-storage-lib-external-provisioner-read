@@ -2,3 +2,6 @@ vendor
 Gopkg.toml
 Gopkg.lock
 **/*.pyc
+cscope.files
+cscope.out
+TAGS

@@ -24,6 +24,8 @@ import (
 	storageapis "k8s.io/api/storage/v1"
 )
 
+// zhou: external-provisioner "csiProvisioner struct" implements it.
+
 // Provisioner is an interface that creates templates for PersistentVolumes
 // and can create the volume as a new resource in the infrastructure provider.
 // It can also remove the volume it created from the underlying storage

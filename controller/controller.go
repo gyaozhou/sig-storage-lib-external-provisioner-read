@@ -72,6 +72,8 @@ const annMigratedTo = "pv.kubernetes.io/migrated-to"
 const annBetaStorageProvisioner = "volume.beta.kubernetes.io/storage-provisioner"
 const annStorageProvisioner = "volume.kubernetes.io/storage-provisioner"
 
+// zhou: scheduler picked up a node.
+
 // This annotation is added to a PVC that has been triggered by scheduler to
 // be dynamically provisioned. Its value is the name of the selected node.
 const annSelectedNode = "volume.kubernetes.io/selected-node"
@@ -88,6 +90,8 @@ var (
 	errStopProvision = errors.New("stop provisioning")
 )
 
+// zhou: context of provision controller
+
 // ProvisionController is a controller that provisions PersistentVolumes for
 // PersistentVolumeClaims.
 type ProvisionController struct {
@@ -98,15 +102,21 @@ type ProvisionController struct {
 	// annStorageProvisioner to set & watch for, respectively
 	provisionerName string
 
+	// zhou: more than one provisioner name.
+
 	// additional provisioner names (beyond provisionerName) that the
 	// provisioner should watch for and handle in annStorageProvisioner
 	additionalProvisionerNames []string
+
+	// zhou: external-provisioner handle, used to create/delete/... volumes.
 
 	// The provisioner the controller will use to provision and delete volumes.
 	// Presumably this implementer of Provisioner carries its own
 	// volume-specific options and such that it needs in order to provision
 	// volumes.
 	provisioner Provisioner
+
+	// zhou: options set by external-provisioner
 
 	claimInformer  cache.SharedIndexInformer
 	claimsIndexer  cache.Indexer
@@ -119,6 +129,8 @@ type ProvisionController struct {
 	// To determine if the informer is internal or external
 	customClaimInformer, customVolumeInformer, customClassInformer bool
 
+	// zhou: PVC workqueue and PV workqueue,
+	//       provision controller handles these two workqueues.
 	claimQueue  workqueue.RateLimitingInterface
 	volumeQueue workqueue.RateLimitingInterface
 
@@ -130,14 +142,17 @@ type ProvisionController struct {
 	component     string
 	eventRecorder record.EventRecorder
 
+	// zhou: options set by external-provisioner
 	resyncPeriod     time.Duration
 	provisionTimeout time.Duration
 	deletionTimeout  time.Duration
 
+	// zhou: options set by external-provisioner
 	rateLimiter               workqueue.RateLimiter
 	exponentialBackOffOnError bool
 	threadiness               int
 
+	// zhou: options set by external-provisioner
 	createProvisionedPVBackoff    *wait.Backoff
 	createProvisionedPVRetryCount int
 	createProvisionedPVInterval   time.Duration
@@ -159,6 +174,8 @@ type ProvisionController struct {
 	// TODO: upstream and we may have a race b/w applying reclaim policy and not if pv has protection finalizer
 	addFinalizer bool
 
+	// zhou: whether enable lib-external-provisioner leader election
+
 	// Whether to do kubernetes leader election at all. It should basically
 	// always be done when possible to avoid duplicate Provision attempts.
 	leaderElection          bool
@@ -166,11 +183,16 @@ type ProvisionController struct {
 	// Parameters of leaderelection.LeaderElectionConfig.
 	leaseDuration, renewDeadline, retryPeriod time.Duration
 
+	// zhou: whether the controller has run
 	hasRun     bool
 	hasRunLock *sync.Mutex
 
+	// zhou: mapping between UID -> *PVC
+
 	// Map UID -> *PVC with all claims that may be provisioned in the background.
 	claimsInProgress sync.Map
+
+	// zhou: PVC object, PV object mapping
 
 	volumeStore VolumeStore
 }
@@ -482,6 +504,8 @@ func ClassesInformer(informer cache.SharedInformer) func(*ProvisionController) e
 	}
 }
 
+// zhou: "nodeLister" provides a method via get from cache.
+
 // NodesLister sets the informer to use for accessing Nodes.
 // This is needed only for PVCs which have a selected node.
 // Defaults to using a GET instead of an informer.
@@ -590,12 +614,18 @@ func DeletionTimeout(timeout time.Duration) func(*ProvisionController) error {
 	}
 }
 
+////////////////////////////////////////////////////////////////////////////////
+// zhou: all functions above implement a options approach for external-provisioner.
+////////////////////////////////////////////////////////////////////////////////
+
 // HasRun returns whether the controller has Run
 func (ctrl *ProvisionController) HasRun() bool {
 	ctrl.hasRunLock.Lock()
 	defer ctrl.hasRunLock.Unlock()
 	return ctrl.hasRun
 }
+
+// zhou: create provision controller
 
 // NewProvisionController creates a new provision controller using
 // the given configuration parameters and with private (non-shared) informers.
@@ -614,6 +644,8 @@ func NewProvisionController(
 	component := provisionerName + "_" + id
 
 	v1.AddToScheme(scheme.Scheme)
+
+	// zhou: k8s event
 	broadcaster := record.NewBroadcaster()
 	broadcaster.StartLogging(klog.Infof)
 	broadcaster.StartRecordingToSink(&corev1.EventSinkImpl{Interface: client.CoreV1().Events(v1.NamespaceAll)})
@@ -645,12 +677,15 @@ func NewProvisionController(
 		hasRunLock:                &sync.Mutex{},
 	}
 
+	// zhou: get options set by external-provisioner
 	for _, option := range options {
 		err := option(controller)
 		if err != nil {
 			klog.Fatalf("Error processing controller options: %s", err)
 		}
 	}
+
+	// zhou: create two workqueues for provision controller
 
 	var rateLimiter workqueue.RateLimiter
 	if controller.rateLimiter != nil {
@@ -669,8 +704,11 @@ func NewProvisionController(
 	}
 	controller.claimQueue = workqueue.NewNamedRateLimitingQueue(rateLimiter, "claims")
 	controller.volumeQueue = workqueue.NewNamedRateLimitingQueue(rateLimiter, "volumes")
-
+	// zhou: informer factory
 	informer := informers.NewSharedInformerFactory(client, controller.resyncPeriod)
+
+	// zhou: add event handler funtions for PVC
+	////////////////////////////////////////////////////////////////////////////////
 
 	// ----------------------
 	// PersistentVolumeClaims
@@ -679,6 +717,8 @@ func NewProvisionController(
 		AddFunc:    func(obj interface{}) { controller.enqueueClaim(obj) },
 		UpdateFunc: func(oldObj, newObj interface{}) { controller.enqueueClaim(newObj) },
 		DeleteFunc: func(obj interface{}) {
+			// zhou: README, why not handle deletion of PVC.
+
 			// NOOP. The claim is either in claimsInProgress and in the queue, so it will be processed as usual
 			// or it's not in claimsInProgress and then we don't care
 		},
@@ -700,7 +740,11 @@ func NewProvisionController(
 	if err != nil {
 		klog.Fatalf("Error setting indexer %s for pvc informer: %v", uidIndex, err)
 	}
+	// zhou: index is the operation interface
 	controller.claimsIndexer = controller.claimInformer.GetIndexer()
+
+	// zhou: add event handler funtions for PV
+	////////////////////////////////////////////////////////////////////////////////
 
 	// -----------------
 	// PersistentVolumes
@@ -717,7 +761,10 @@ func NewProvisionController(
 		controller.volumeInformer = informer.Core().V1().PersistentVolumes().Informer()
 		controller.volumeInformer.AddEventHandler(volumeHandler)
 	}
+	// zhou: the informer's local cache as a Store
 	controller.volumes = controller.volumeInformer.GetStore()
+
+	// zhou: ////////////////////////////////////////////////////////////////////////////////
 
 	// --------------
 	// StorageClasses
@@ -726,7 +773,10 @@ func NewProvisionController(
 	if controller.classInformer == nil {
 		controller.classInformer = informer.Storage().V1().StorageClasses().Informer()
 	}
+	// zhou: the informer's local cache as a Store
 	controller.classes = controller.classInformer.GetStore()
+
+	// zhou: volume creation options ?
 
 	if controller.createProvisionerPVLimiter != nil {
 		klog.V(2).Infof("Using saving PVs to API server in background")
@@ -770,6 +820,8 @@ func getObjectUID(obj interface{}) (string, error) {
 	return string(object.GetUID()), nil
 }
 
+// zhou: enqueue PVC
+
 // enqueueClaim takes an obj and converts it into UID that is then put onto claim work queue.
 func (ctrl *ProvisionController) enqueueClaim(obj interface{}) {
 	uid, err := getObjectUID(obj)
@@ -779,6 +831,8 @@ func (ctrl *ProvisionController) enqueueClaim(obj interface{}) {
 	}
 	ctrl.claimQueue.Add(uid)
 }
+
+// zhou: enqueue PV
 
 // enqueueVolume takes an obj and converts it into a namespace/name string which
 // is then put onto the given work queue.
@@ -791,6 +845,8 @@ func (ctrl *ProvisionController) enqueueVolume(obj interface{}) {
 	}
 	ctrl.volumeQueue.Add(key)
 }
+
+// zhou: remove PV
 
 // forgetVolume Forgets an obj from the given work queue, telling the queue to
 // stop tracking its retries because e.g. the obj was deleted
@@ -805,17 +861,23 @@ func (ctrl *ProvisionController) forgetVolume(obj interface{}) {
 	ctrl.volumeQueue.Done(key)
 }
 
+// zhou: README, provision controller begins to run
+
 // Run starts all of this controller's control loops
 func (ctrl *ProvisionController) Run(ctx context.Context) {
+
 	run := func(ctx context.Context) {
 		klog.Infof("Starting provisioner controller %s!", ctrl.component)
 		defer utilruntime.HandleCrash()
 		defer ctrl.claimQueue.ShutDown()
 		defer ctrl.volumeQueue.ShutDown()
 
+		// zhou: set controller is running
 		ctrl.hasRunLock.Lock()
 		ctrl.hasRun = true
 		ctrl.hasRunLock.Unlock()
+
+		// zhou: set up prometheus server
 		if ctrl.metricsPort > 0 {
 			prometheus.MustRegister([]prometheus.Collector{
 				metrics.PersistentVolumeClaimProvisionTotal,
@@ -852,6 +914,7 @@ func (ctrl *ProvisionController) Run(ctx context.Context) {
 			return
 		}
 
+		// zhou: seperate worker to run PVC reconcile and PV reconcile.
 		for i := 0; i < ctrl.threadiness; i++ {
 			go wait.Until(func() { ctrl.runClaimWorker(ctx) }, time.Second, ctx.Done())
 			go wait.Until(func() { ctrl.runVolumeWorker(ctx) }, time.Second, ctx.Done())
@@ -862,8 +925,11 @@ func (ctrl *ProvisionController) Run(ctx context.Context) {
 		select {}
 	}
 
+	// zhou: start "queueStore" which implements interface "VolumeStore"
+
 	go ctrl.volumeStore.Run(ctx, DefaultThreadiness)
 
+	// zhou: lib-external-provisioner take charge of leader election.
 	if ctrl.leaderElection {
 		rl, err := resourcelock.New("endpoints",
 			ctrl.leaderElectionNamespace,
@@ -896,15 +962,21 @@ func (ctrl *ProvisionController) Run(ctx context.Context) {
 	}
 }
 
+// zhou: provision controller's PVC worker, default worker number is 100.
+
 func (ctrl *ProvisionController) runClaimWorker(ctx context.Context) {
 	for ctrl.processNextClaimWorkItem(ctx) {
 	}
 }
 
+// zhou: provision controller's PV worker, default worker number is 100.
+
 func (ctrl *ProvisionController) runVolumeWorker(ctx context.Context) {
 	for ctrl.processNextVolumeWorkItem(ctx) {
 	}
 }
+
+// zhou: handle PVC workqueue
 
 // processNextClaimWorkItem processes items from claimQueue
 func (ctrl *ProvisionController) processNextClaimWorkItem(ctx context.Context) bool {
@@ -921,15 +993,19 @@ func (ctrl *ProvisionController) processNextClaimWorkItem(ctx context.Context) b
 			defer cancel()
 			ctx = timeout
 		}
+
+		// zhou: remove "obj" from workqueue
 		defer ctrl.claimQueue.Done(obj)
+
 		var key string
 		var ok bool
 		if key, ok = obj.(string); !ok {
 			ctrl.claimQueue.Forget(obj)
 			return fmt.Errorf("expected string in workqueue but got %#v", obj)
 		}
-
+		// zhou: block to handle PVC
 		if err := ctrl.syncClaimHandler(ctx, key); err != nil {
+			// zhou: handle failed in different situation.
 			if ctrl.failedProvisionThreshold == 0 {
 				klog.Warningf("Retrying syncing claim %q, failure %v", key, ctrl.claimQueue.NumRequeues(obj))
 				ctrl.claimQueue.AddRateLimited(obj)
@@ -945,7 +1021,7 @@ func (ctrl *ProvisionController) processNextClaimWorkItem(ctx context.Context) b
 			}
 			return fmt.Errorf("error syncing claim %q: %s", key, err.Error())
 		}
-
+		// zhou: success
 		ctrl.claimQueue.Forget(obj)
 		// Silently remove the PVC from list of volumes in progress. The provisioning either succeeded
 		// or the PVC was ignored by this provisioner.
@@ -960,6 +1036,8 @@ func (ctrl *ProvisionController) processNextClaimWorkItem(ctx context.Context) b
 
 	return true
 }
+
+// zhou: handle PV workqueue
 
 // processNextVolumeWorkItem processes items from volumeQueue
 func (ctrl *ProvisionController) processNextVolumeWorkItem(ctx context.Context) bool {
@@ -984,6 +1062,7 @@ func (ctrl *ProvisionController) processNextVolumeWorkItem(ctx context.Context) 
 			return fmt.Errorf("expected string in workqueue but got %#v", obj)
 		}
 
+		// zhou: block to handle PV
 		if err := ctrl.syncVolumeHandler(ctx, key); err != nil {
 			if ctrl.failedDeleteThreshold == 0 {
 				klog.Warningf("Retrying syncing volume %q, failure %v", key, ctrl.volumeQueue.NumRequeues(obj))
@@ -998,7 +1077,7 @@ func (ctrl *ProvisionController) processNextVolumeWorkItem(ctx context.Context) 
 			}
 			return fmt.Errorf("error syncing volume %q: %s", key, err.Error())
 		}
-
+		// zhou: success
 		ctrl.volumeQueue.Forget(obj)
 		return nil
 	}()
@@ -1011,6 +1090,8 @@ func (ctrl *ProvisionController) processNextVolumeWorkItem(ctx context.Context) 
 	return true
 }
 
+// zhou: PVC
+
 // syncClaimHandler gets the claim from informer's cache then calls syncClaim. A non-nil error triggers requeuing of the claim.
 func (ctrl *ProvisionController) syncClaimHandler(ctx context.Context, key string) error {
 	objs, err := ctrl.claimsIndexer.ByIndex(uidIndex, key)
@@ -1019,8 +1100,10 @@ func (ctrl *ProvisionController) syncClaimHandler(ctx context.Context, key strin
 	}
 	var claimObj interface{}
 	if len(objs) > 0 {
+		// zhou: add or update
 		claimObj = objs[0]
 	} else {
+		// zhou: delete, but PVC doesn't handle delete event.
 		obj, found := ctrl.claimsInProgress.Load(key)
 		if !found {
 			utilruntime.HandleError(fmt.Errorf("claim %q in work queue no longer exists", key))
@@ -1045,6 +1128,8 @@ func (ctrl *ProvisionController) syncVolumeHandler(ctx context.Context, key stri
 	return ctrl.syncVolume(ctx, volumeObj)
 }
 
+// zhou: Reconcile(), handle PVC
+
 // syncClaim checks if the claim should have a volume provisioned for it and
 // provisions one if so. Returns an error if the claim is to be requeued.
 func (ctrl *ProvisionController) syncClaim(ctx context.Context, obj interface{}) error {
@@ -1053,13 +1138,14 @@ func (ctrl *ProvisionController) syncClaim(ctx context.Context, obj interface{})
 		return fmt.Errorf("expected claim but got %+v", obj)
 	}
 
+	// zhou: varify annotation, provisioner name, StorageClass bind mode.
 	should, err := ctrl.shouldProvision(ctx, claim)
 	if err != nil {
 		ctrl.updateProvisionStats(claim, err, time.Time{})
 		return err
 	} else if should {
 		startTime := time.Now()
-
+		// zhou: README, ....
 		status, err := ctrl.provisionClaimOperation(ctx, claim)
 		ctrl.updateProvisionStats(claim, err, startTime)
 		if err == nil || status == ProvisioningFinished {
@@ -1113,6 +1199,8 @@ func (ctrl *ProvisionController) syncVolume(ctx context.Context, obj interface{}
 	return nil
 }
 
+// zhou: README,
+
 func (ctrl *ProvisionController) handleProtectionFinalizer(ctx context.Context, volume *v1.PersistentVolume) (*v1.PersistentVolume, error) {
 	var modifiedFinalizers []string
 	var modified bool
@@ -1139,6 +1227,8 @@ func (ctrl *ProvisionController) handleProtectionFinalizer(ctx context.Context, 
 	return volume, nil
 }
 
+// zhou: checking provisioner name and additional provisioner name.
+
 // knownProvisioner checks if provisioner name has been
 // configured to provision volumes for
 func (ctrl *ProvisionController) knownProvisioner(provisioner string) bool {
@@ -1153,6 +1243,8 @@ func (ctrl *ProvisionController) knownProvisioner(provisioner string) bool {
 	return false
 }
 
+// zhou: README,
+
 // shouldProvision returns whether a claim should have a volume provisioned for
 // it, i.e. whether a Provision is "desired"
 func (ctrl *ProvisionController) shouldProvision(ctx context.Context, claim *v1.PersistentVolumeClaim) (bool, error) {
@@ -1160,24 +1252,31 @@ func (ctrl *ProvisionController) shouldProvision(ctx context.Context, claim *v1.
 		return false, nil
 	}
 
+	// zhou: "Qualifier is an optional interface implemented by provisioners"
 	if qualifier, ok := ctrl.provisioner.(Qualifier); ok {
+		// zhou: external-provisioner, csiProvisioner.ShouldProvision(),
+		//       the driver name matched, and PVC owns the annotation required provision.
 		if !qualifier.ShouldProvision(ctx, claim) {
 			return false, nil
 		}
 	}
 
+	// zhou: the annotation is already checked in csiProvisioner.ShouldProvision().
 	provisioner, found := claim.Annotations[annStorageProvisioner]
 	if !found {
 		provisioner, found = claim.Annotations[annBetaStorageProvisioner]
 	}
 
 	if found {
+		// zhou: check provisioner name (csi driver name) and additional provisioner name.
 		if ctrl.knownProvisioner(provisioner) {
+			// zhou: get corresponding StorageClass object.
 			claimClass := util.GetPersistentVolumeClaimClass(claim)
 			class, err := ctrl.getStorageClass(claimClass)
 			if err != nil {
 				return false, err
 			}
+			// zhou: if bind mode is "VolumeBindingWaitForFirstConsumer"
 			if class.VolumeBindingMode != nil && *class.VolumeBindingMode == storage.VolumeBindingWaitForFirstConsumer {
 				// When claim is in delay binding mode, annSelectedNode is
 				// required to provision volume.
@@ -1236,6 +1335,12 @@ func (ctrl *ProvisionController) shouldDelete(ctx context.Context, volume *v1.Pe
 
 	return true
 }
+
+// zhou: if PVC request block volume, verify that csi driver supporting it.
+//       "SupportsBlock always return true, because current CSI spec doesn't allow checking
+//        drivers' capability of block volume before creating volume.
+//        Drivers that don't support block volume should return error for CreateVolume called
+//        by Provision if block AccessType is specified."
 
 // canProvision returns error if provisioner can't provision claim.
 func (ctrl *ProvisionController) canProvision(ctx context.Context, claim *v1.PersistentVolumeClaim) error {
@@ -1326,15 +1431,21 @@ func (ctrl *ProvisionController) rescheduleProvisioning(ctx context.Context, cla
 	return nil
 }
 
+// zhou: README, create PV/volume
+
 // provisionClaimOperation attempts to provision a volume for the given claim.
 // Returns nil error only when the volume was provisioned (in which case it also returns ProvisioningFinished),
 // a normal error when the volume was not provisioned and provisioning should be retried (requeue the claim),
 // or the special errStopProvision when provisioning was impossible and no further attempts to provision should be tried.
 func (ctrl *ProvisionController) provisionClaimOperation(ctx context.Context, claim *v1.PersistentVolumeClaim) (ProvisioningState, error) {
+	// zhou: get StorageClass
+
 	// Most code here is identical to that found in controller.go of kube's PV controller...
 	claimClass := util.GetPersistentVolumeClaimClass(claim)
 	operation := fmt.Sprintf("provision %q class %q", claimToClaimKey(claim), claimClass)
 	klog.Info(logOperation(operation, "started"))
+
+	// zhou: generate corresponding PV name
 
 	//  A previous doProvisionClaim may just have finished while we were waiting for
 	//  the locks. Check that PV (with deterministic name) hasn't been provisioned
@@ -1347,6 +1458,8 @@ func (ctrl *ProvisionController) provisionClaimOperation(ctx context.Context, cl
 		return ProvisioningFinished, errStopProvision
 	}
 
+	// zhou: PVC ref will be set to "pv.spec.claimref"
+
 	// Prepare a claimRef to the claim early (to fail before a volume is
 	// provisioned)
 	claimRef, err := ref.GetReference(scheme.Scheme, claim)
@@ -1354,6 +1467,8 @@ func (ctrl *ProvisionController) provisionClaimOperation(ctx context.Context, cl
 		klog.Error(logOperation(operation, "unexpected error getting claim reference: %v", err))
 		return ProvisioningNoChange, err
 	}
+
+	// zhou: verify the csi driver can provision block volume if PVC request a block volume.
 
 	// Check if this provisioner can provision this claim.
 	if err = ctrl.canProvision(ctx, claim); err != nil {
@@ -1369,6 +1484,7 @@ func (ctrl *ProvisionController) provisionClaimOperation(ctx context.Context, cl
 		klog.Error(logOperation(operation, "error getting claim's StorageClass's fields: %v", err))
 		return ProvisioningFinished, err
 	}
+	// zhou: verify provisioner name again
 	if !ctrl.knownProvisioner(class.Provisioner) {
 		// class.Provisioner has either changed since shouldProvision() or
 		// annDynamicallyProvisioned contains different provisioner than
@@ -1376,6 +1492,8 @@ func (ctrl *ProvisionController) provisionClaimOperation(ctx context.Context, cl
 		klog.Error(logOperation(operation, "unknown provisioner %q requested in claim's StorageClass", class.Provisioner))
 		return ProvisioningFinished, errStopProvision
 	}
+
+	// zhou: verify the selected node in PVC's annotation.
 
 	var selectedNode *v1.Node
 	// Get SelectedNode
@@ -1394,13 +1512,15 @@ func (ctrl *ProvisionController) provisionClaimOperation(ctx context.Context, cl
 
 	options := ProvisionOptions{
 		StorageClass: class,
-		PVName:       pvName,
+		PVName:       pvName, // zhou: not be used by external-provisioner
 		PVC:          claim,
 		SelectedNode: selectedNode,
 	}
 
 	ctrl.eventRecorder.Event(claim, v1.EventTypeNormal, "Provisioning", fmt.Sprintf("External provisioner is provisioning volume for claim %q", claimToClaimKey(claim)))
 
+	// zhou: external-provisioner, csiProvisioner.Provision()
+	//       The volume was created in storage system, and "volume" is the PV object to be created.
 	volume, result, err := ctrl.provisioner.Provision(ctx, options)
 	if err != nil {
 		if ierr, ok := err.(*IgnoredError); ok {
@@ -1444,6 +1564,8 @@ func (ctrl *ProvisionController) provisionClaimOperation(ctx context.Context, cl
 	// Set ClaimRef and the PV controller will bind and set annBoundByController for us
 	volume.Spec.ClaimRef = claimRef
 
+	// zhou: README, "external-provisioner.volume.kubernetes.io/finalizer"
+
 	// Add external provisioner finalizer if it doesn't already have it
 	if ctrl.addFinalizer && !ctrl.checkFinalizer(volume, finalizerPV) {
 		volume.ObjectMeta.Finalizers = append(volume.ObjectMeta.Finalizers, finalizerPV)
@@ -1454,9 +1576,11 @@ func (ctrl *ProvisionController) provisionClaimOperation(ctx context.Context, cl
 
 	klog.Info(logOperation(operation, "succeeded"))
 
+	// zhou: create PV object and record PVC <-> PV mapping.
 	if err := ctrl.volumeStore.StoreVolume(claim, volume); err != nil {
 		return ProvisioningFinished, err
 	}
+
 	if err = ctrl.volumes.Add(volume); err != nil {
 		utilruntime.HandleError(err)
 	}
@@ -1630,6 +1754,7 @@ func claimToClaimKey(claim *v1.PersistentVolumeClaim) string {
 // will be regarded as supported for block volume.
 func (ctrl *ProvisionController) supportsBlock(ctx context.Context) bool {
 	if blockProvisioner, ok := ctrl.provisioner.(BlockProvisioner); ok {
+		// zhou: external-provisioner, csiProvisioner.SupportsBlock()
 		return blockProvisioner.SupportsBlock(ctx)
 	}
 	return false

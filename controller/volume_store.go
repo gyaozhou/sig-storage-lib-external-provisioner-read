@@ -34,6 +34,9 @@ import (
 	klog "k8s.io/klog/v2"
 )
 
+// zhou: README, PVC object, PV object mapping. And it takes charge of object creation.
+//       Works like informer/index.
+
 // VolumeStore is an interface that's used to save PersistentVolumes to API server.
 // Implementation of the interface add custom error recovery policy.
 // A volume is added via StoreVolume(). It's enough to store the volume only once.
@@ -83,7 +86,10 @@ func NewVolumeStoreQueue(
 	}
 }
 
+// zhou: record PVC <-> PV mapping
+
 func (q *queueStore) StoreVolume(_ *v1.PersistentVolumeClaim, volume *v1.PersistentVolume) error {
+	// zhou: create PV object
 	if err := q.doSaveVolume(volume); err != nil {
 		q.volumes.Store(volume.Name, volume)
 		q.queue.Add(volume.Name)
@@ -150,6 +156,8 @@ func (q *queueStore) processNextWorkItem() bool {
 	return true
 }
 
+// zhou: create PV object
+
 func (q *queueStore) doSaveVolume(volume *v1.PersistentVolume) error {
 	klog.V(5).Infof("Saving volume %s", volume.Name)
 	_, err := q.client.CoreV1().PersistentVolumes().Create(context.Background(), volume, metav1.CreateOptions{})
@@ -204,6 +212,8 @@ func NewBackoffStore(client kubernetes.Interface,
 		ctrl:          ctrl,
 	}
 }
+
+// zhou: README,
 
 func (b *backoffStore) StoreVolume(claim *v1.PersistentVolumeClaim, volume *v1.PersistentVolume) error {
 	// Try to create the PV object several times

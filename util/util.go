@@ -79,6 +79,8 @@ func GetPersistentVolumeClass(volume *v1.PersistentVolume) string {
 	return volume.Spec.StorageClassName
 }
 
+// zhou: get StorageClass from PVC spec.
+
 // GetPersistentVolumeClaimClass returns StorageClassName. If no storage class was
 // requested, it returns "".
 func GetPersistentVolumeClaimClass(claim *v1.PersistentVolumeClaim) string {
@@ -93,6 +95,8 @@ func GetPersistentVolumeClaimClass(claim *v1.PersistentVolumeClaim) string {
 
 	return ""
 }
+
+// zhou: does Block Volume required
 
 // CheckPersistentVolumeClaimModeBlock checks VolumeMode.
 // If the mode is Block, return true otherwise return false.
